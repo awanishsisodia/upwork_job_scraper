@@ -3,6 +3,11 @@ import random
 import json
 import csv
 import pandas as pd
+import platform
+import shutil
+import subprocess
+import urllib.request
+import zipfile
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -27,7 +32,7 @@ class UpworkAIScraper:
             headless (bool): Whether to run browser in headless mode
         """
         self.base_url = "https://www.upwork.com"
-        self.search_url = "https://www.upwork.com/search/jobs/?q=AI"
+        self.search_url = "https://www.upwork.com/nx/search/jobs/?nbs=1&q=AI"
         self.jobs = []
         self.driver = None
         self.headless = headless
@@ -54,18 +59,115 @@ class UpworkAIScraper:
             # Set window size
             chrome_options.add_argument("--window-size=1920,1080")
             
-            # Initialize driver
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            # Initialize driver with proper architecture detection
+            try:
+                # For Mac ARM64, we need to handle the architecture mismatch
+                import platform
+                if platform.system() == "Darwin" and platform.machine() == "arm64":
+                    # Clear any cached drivers that might be wrong architecture
+                    import shutil
+                    cache_dir = os.path.expanduser("~/.wdm/drivers/chromedriver")
+                    if os.path.exists(cache_dir):
+                        try:
+                            shutil.rmtree(cache_dir)
+                            logger.info("Cleared ChromeDriver cache for fresh download")
+                        except Exception as e:
+                            logger.warning(f"Could not clear cache: {e}")
+                    
+                    # Force download of mac-arm64 version
+                    try:
+                        from webdriver_manager.chrome import ChromeDriverManager
+                        from webdriver_manager.core.os_manager import ChromeType
+                        
+                        # Try to get the correct driver path
+                        driver_path = ChromeDriverManager(chrome_type=ChromeType.GOOGLE).install()
+                        
+                        # Verify the driver is executable
+                        if not os.access(driver_path, os.X_OK):
+                            os.chmod(driver_path, 0o755)
+                        
+                        service = Service(driver_path)
+                        self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                        
+                    except Exception as e:
+                        logger.warning(f"ChromeDriverManager failed, trying alternative approach: {e}")
+                        # Fallback: try to find and use the correct driver manually
+                        self._setup_driver_manual_fallback(chrome_options)
+                else:
+                    # For non-Mac ARM64 systems, use standard approach
+                    service = Service(ChromeDriverManager().install())
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                
+            except Exception as e:
+                logger.error(f"Error setting up WebDriver: {e}")
+                raise
             
             # Execute script to remove webdriver property
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
             logger.info("WebDriver setup completed successfully")
+    
+    def _setup_driver_manual_fallback(self, chrome_options):
+        """Manual fallback for Mac ARM64 ChromeDriver setup"""
+        try:
+            # Try to find the correct driver in the cache
+            cache_dir = os.path.expanduser("~/.wdm/drivers/chromedriver")
+            if os.path.exists(cache_dir):
+                # Look for the actual chromedriver executable
+                for root, dirs, files in os.walk(cache_dir):
+                    for file in files:
+                        if file == "chromedriver" and not file.endswith(".chromedriver"):
+                            driver_path = os.path.join(root, file)
+                            try:
+                                # Make it executable
+                                os.chmod(driver_path, 0o755)
+                                
+                                # Test if it's the right architecture
+                                import subprocess
+                                result = subprocess.run([driver_path, "--version"], 
+                                                      capture_output=True, text=True, timeout=10)
+                                
+                                if result.returncode == 0:
+                                    logger.info(f"Found working ChromeDriver: {driver_path}")
+                                    service = Service(driver_path)
+                                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                                    return
+                                    
+                            except Exception as e:
+                                logger.warning(f"Driver {driver_path} failed: {e}")
+                                continue
+            
+            # If we get here, try to download manually
+            logger.info("Attempting manual ChromeDriver download...")
+            import urllib.request
+            import zipfile
+            
+            # Download the correct mac-arm64 version
+            url = "https://storage.googleapis.com/chrome-for-testing-public/139.0.7258.154/mac-arm64/chromedriver-mac-arm64.zip"
+            zip_path = os.path.expanduser("~/chromedriver-mac-arm64.zip")
+            
+            logger.info(f"Downloading ChromeDriver from {url}")
+            urllib.request.urlretrieve(url, zip_path)
+            
+            # Extract the zip file
+            extract_dir = os.path.expanduser("~/chromedriver-mac-arm64")
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            
+            # Find the chromedriver executable
+            driver_path = os.path.join(extract_dir, "chromedriver-mac-arm64", "chromedriver")
+            os.chmod(driver_path, 0o755)
+            
+            # Clean up
+            os.remove(zip_path)
+            
+            logger.info(f"Manual download successful: {driver_path}")
+            service = Service(driver_path)
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
             
         except Exception as e:
-            logger.error(f"Error setting up WebDriver: {e}")
-            raise
+            logger.error(f"Manual fallback failed: {e}")
+            raise Exception(f"All ChromeDriver setup methods failed: {e}")
     
     def random_delay(self, min_delay=2, max_delay=5):
         """Add random delay to avoid detection"""

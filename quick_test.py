@@ -21,7 +21,7 @@ def quick_test():
         test_config = {
             'search_queries': ['AI', 'Machine Learning'],  # Just 2 queries
             'max_pages_per_query': 1,  # Just 1 page per query
-            'headless_mode': False,  # Visible browser for testing
+            'headless_mode': False,  # Visible browser for testing (better for Cloudflare bypass)
             'output_formats': ['json'],  # Just JSON output
             'output_directory': 'output',
             'filename_prefix': 'quick_test'

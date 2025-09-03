@@ -80,7 +80,7 @@ Examples:
     args = parser.parse_args()
     
     # Update configuration based on command line arguments
-    config = {
+    scraper_config = {
         'search_queries': args.queries,
         'max_pages_per_query': args.pages,
         'headless_mode': not args.no_headless,
@@ -90,9 +90,9 @@ Examples:
     }
     
     # Update global config for filtering
-    global MIN_BUDGET, MAX_BUDGET
-    MIN_BUDGET = args.min_budget
-    MAX_BUDGET = args.max_budget
+    import config as config_module
+    config_module.MIN_BUDGET = args.min_budget
+    config_module.MAX_BUDGET = args.max_budget
     
     # Set logging level
     if args.verbose:
@@ -101,17 +101,17 @@ Examples:
     print("="*60)
     print("UPWORK AI JOBS SCRAPER")
     print("="*60)
-    print(f"Search Queries: {', '.join(config['search_queries'])}")
-    print(f"Max Pages per Query: {config['max_pages_per_query']}")
-    print(f"Headless Mode: {config['headless_mode']}")
-    print(f"Output Formats: {', '.join(config['output_formats'])}")
-    print(f"Min Budget: ${MIN_BUDGET if MIN_BUDGET > 0 else 'No limit'}")
-    print(f"Max Budget: ${MAX_BUDGET if MAX_BUDGET else 'No limit'}")
+    print(f"Search Queries: {', '.join(scraper_config['search_queries'])}")
+    print(f"Max Pages per Query: {scraper_config['max_pages_per_query']}")
+    print(f"Headless Mode: {scraper_config['headless_mode']}")
+    print(f"Output Formats: {', '.join(scraper_config['output_formats'])}")
+    print(f"Min Budget: ${config_module.MIN_BUDGET if config_module.MIN_BUDGET > 0 else 'No limit'}")
+    print(f"Max Budget: ${config_module.MAX_BUDGET if config_module.MAX_BUDGET else 'No limit'}")
     print("="*60)
     
     try:
         # Create and run scraper
-        scraper = EnhancedUpworkAIScraper(config)
+        scraper = EnhancedUpworkAIScraper(scraper_config)
         scraper.run()
         
         # Print summary

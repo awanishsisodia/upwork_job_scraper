@@ -4,6 +4,11 @@ import json
 import csv
 import pandas as pd
 import os
+import platform
+import shutil
+import subprocess
+import urllib.request
+import zipfile
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -76,7 +81,7 @@ class EnhancedUpworkAIScraper:
             if self.config['headless_mode']:
                 chrome_options.add_argument("--headless")
             
-            # Enhanced anti-detection options
+            # Enhanced anti-detection options for Cloudflare bypass
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -84,8 +89,16 @@ class EnhancedUpworkAIScraper:
             chrome_options.add_experimental_option('useAutomationExtension', False)
             chrome_options.add_argument("--disable-extensions")
             chrome_options.add_argument("--disable-plugins")
-            chrome_options.add_argument("--disable-images")
-            chrome_options.add_argument("--disable-javascript")
+            # Don't disable JavaScript - Cloudflare needs it
+            # chrome_options.add_argument("--disable-javascript")
+            # Don't disable images - makes it look more human
+            # chrome_options.add_argument("--disable-images")
+            
+            # Additional Cloudflare bypass options
+            chrome_options.add_argument("--disable-web-security")
+            chrome_options.add_argument("--allow-running-insecure-content")
+            chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+            chrome_options.add_argument("--disable-ipc-flooding-protection")
             
             # Set user agent
             if USER_AGENT_ROTATION:
@@ -94,9 +107,46 @@ class EnhancedUpworkAIScraper:
             # Set window size
             chrome_options.add_argument(f"--window-size={WINDOW_SIZE[0]},{WINDOW_SIZE[1]}")
             
-            # Initialize driver
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            # Initialize driver with proper architecture detection
+            try:
+                # For Mac ARM64, we need to handle the architecture mismatch
+                if platform.system() == "Darwin" and platform.machine() == "arm64":
+                    # Clear any cached drivers that might be wrong architecture
+                    cache_dir = os.path.expanduser("~/.wdm/drivers/chromedriver")
+                    if os.path.exists(cache_dir):
+                        try:
+                            shutil.rmtree(cache_dir)
+                            self.logger.info("Cleared ChromeDriver cache for fresh download")
+                        except Exception as e:
+                            self.logger.warning(f"Could not clear cache: {e}")
+                    
+                    # Force download of mac-arm64 version
+                    try:
+                        from webdriver_manager.chrome import ChromeDriverManager
+                        from webdriver_manager.core.os_manager import ChromeType
+                        
+                        # Try to get the correct driver path
+                        driver_path = ChromeDriverManager(chrome_type=ChromeType.GOOGLE).install()
+                        
+                        # Verify the driver is executable
+                        if not os.access(driver_path, os.X_OK):
+                            os.chmod(driver_path, 0o755)
+                        
+                        service = Service(driver_path)
+                        self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                        
+                    except Exception as e:
+                        self.logger.warning(f"ChromeDriverManager failed, trying alternative approach: {e}")
+                        # Fallback: try to find and use the correct driver manually
+                        self._setup_driver_manual_fallback(chrome_options)
+                else:
+                    # For non-Mac ARM64 systems, use standard approach
+                    service = Service(ChromeDriverManager().install())
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                
+            except Exception as e:
+                self.logger.error(f"Error setting up WebDriver: {e}")
+                raise
             
             # Execute anti-detection scripts
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -109,6 +159,121 @@ class EnhancedUpworkAIScraper:
             self.logger.error(f"Error setting up WebDriver: {e}")
             raise
     
+    def _is_cloudflare_page(self):
+        """Check if the current page is a Cloudflare protection page"""
+        try:
+            page_source = self.driver.page_source.lower()
+            cloudflare_indicators = [
+                'cloudflare',
+                'checking your browser',
+                'ddos protection',
+                'security check',
+                'please wait',
+                'ray id:'
+            ]
+            return any(indicator in page_source for indicator in cloudflare_indicators)
+        except:
+            return False
+    
+    def _bypass_cloudflare(self):
+        """Attempt to bypass Cloudflare protection"""
+        try:
+            self.logger.info("Waiting for Cloudflare to clear...")
+            
+            # Wait for Cloudflare to clear (usually 5-10 seconds)
+            max_wait = 30
+            wait_time = 0
+            
+            while wait_time < max_wait:
+                if not self._is_cloudflare_page():
+                    self.logger.info("Cloudflare bypassed successfully!")
+                    return True
+                
+                time.sleep(2)
+                wait_time += 2
+                
+                # Try to find and click any "I'm human" buttons
+                try:
+                    human_buttons = self.driver.find_elements(By.XPATH, 
+                        "//*[contains(text(), 'I am human') or contains(text(), 'Verify') or contains(text(), 'Continue')]")
+                    for button in human_buttons:
+                        if button.is_displayed() and button.is_enabled():
+                            button.click()
+                            self.logger.info("Clicked human verification button")
+                            time.sleep(3)
+                            break
+                except:
+                    pass
+            
+            if self._is_cloudflare_page():
+                self.logger.warning("Cloudflare bypass timeout - page may still be protected")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error during Cloudflare bypass: {e}")
+            return False
+    
+    def _setup_driver_manual_fallback(self, chrome_options):
+        """Manual fallback for Mac ARM64 ChromeDriver setup"""
+        try:
+            # Try to find the correct driver in the cache
+            cache_dir = os.path.expanduser("~/.wdm/drivers/chromedriver")
+            if os.path.exists(cache_dir):
+                # Look for the actual chromedriver executable
+                for root, dirs, files in os.walk(cache_dir):
+                    for file in files:
+                        if file == "chromedriver" and not file.endswith(".chromedriver"):
+                            driver_path = os.path.join(root, file)
+                            try:
+                                # Make it executable
+                                os.chmod(driver_path, 0o755)
+                                
+                                # Test if it's the right architecture
+                                result = subprocess.run([driver_path, "--version"], 
+                                                      capture_output=True, text=True, timeout=10)
+                                
+                                if result.returncode == 0:
+                                    self.logger.info(f"Found working ChromeDriver: {driver_path}")
+                                    service = Service(driver_path)
+                                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                                    return
+                                    
+                            except Exception as e:
+                                self.logger.warning(f"Driver {driver_path} failed: {e}")
+                                continue
+            
+            # If we get here, try to download manually
+            self.logger.info("Attempting manual ChromeDriver download...")
+            
+            # Download the correct mac-arm64 version
+            url = "https://storage.googleapis.com/chrome-for-testing-public/139.0.7258.154/mac-arm64/chromedriver-mac-arm64.zip"
+            zip_path = os.path.expanduser("~/chromedriver-mac-arm64.zip")
+            
+            self.logger.info(f"Downloading ChromeDriver from {url}")
+            urllib.request.urlretrieve(url, zip_path)
+            
+            # Extract the zip file
+            extract_dir = os.path.expanduser("~/chromedriver-mac-arm64")
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            
+            # Find the chromedriver executable
+            driver_path = os.path.join(extract_dir, "chromedriver-mac-arm64", "chromedriver")
+            os.chmod(driver_path, 0o755)
+            
+            # Clean up
+            os.remove(zip_path)
+            
+            self.logger.info(f"Manual download successful: {driver_path}")
+            service = Service(driver_path)
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            
+        except Exception as e:
+            self.logger.error(f"Manual fallback failed: {e}")
+            raise Exception(f"All ChromeDriver setup methods failed: {e}")
+    
     def random_delay(self, delay_range):
         """Add random delay within specified range"""
         if RANDOM_DELAYS:
@@ -120,12 +285,18 @@ class EnhancedUpworkAIScraper:
         if max_pages is None:
             max_pages = self.config['max_pages_per_query']
             
-        search_url = f"{self.base_url}/search/jobs/?q={query.replace(' ', '+')}"
+        search_url = f"{self.base_url}/nx/search/jobs/?nbs=1&q={query.replace(' ', '+')}"
         self.logger.info(f"Searching for jobs with query: {query}")
         
         try:
             self.driver.get(search_url)
             self.random_delay(DELAY_BETWEEN_QUERIES)
+            
+            # Handle Cloudflare protection
+            if self._is_cloudflare_page():
+                self.logger.info("Cloudflare detected, attempting to bypass...")
+                self._bypass_cloudflare()
+                self.random_delay((5, 10))  # Wait longer after bypass
             
             page = 1
             jobs_found = 0
@@ -133,22 +304,65 @@ class EnhancedUpworkAIScraper:
             while page <= max_pages:
                 self.logger.info(f"Scraping page {page} for query: {query}")
                 
-                # Wait for jobs to load
+                # Wait for jobs to load or check for Cloudflare
                 try:
+                    # First check if we're still on a Cloudflare page
+                    if self._is_cloudflare_page():
+                        self.logger.info("Cloudflare detected again, attempting to bypass...")
+                        self._bypass_cloudflare()
+                        self.random_delay((3, 6))
+                    
+                    # Wait for jobs to load
                     WebDriverWait(self.driver, 15).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, "[data-test='job-tile']"))
                     )
                 except:
-                    self.logger.warning(f"No job cards found on page {page} for query: {query}")
-                    break
+                    # Check if it's a Cloudflare page
+                    if self._is_cloudflare_page():
+                        self.logger.warning(f"Cloudflare protection active on page {page} for query: {query}")
+                        break
+                    else:
+                        self.logger.warning(f"No job cards found on page {page} for query: {query}")
+                        break
                 
                 # Parse the page
                 soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-                job_cards = soup.find_all("div", {"data-test": "job-tile"})
+                
+                # Try multiple selectors for job cards (Upwork might use different structures)
+                job_cards = []
+                selectors = [
+                    "div[data-test='job-tile']",
+                    "div[data-test='job-card']",
+                    "div[data-test='job']",
+                    "div.job-tile",
+                    "div.job-card",
+                    "div[class*='job']",
+                    "article[data-test='job-tile']",
+                    "article[data-test='job-card']"
+                ]
+                
+                for selector in selectors:
+                    try:
+                        job_cards = soup.select(selector)
+                        if job_cards:
+                            self.logger.info(f"Found {len(job_cards)} jobs using selector: {selector}")
+                            break
+                    except:
+                        continue
                 
                 if not job_cards:
+                    # Log the page structure for debugging
                     self.logger.warning(f"No job cards found on page {page} for query: {query}")
-                    break
+                    self.logger.info("Page title: " + self.driver.title)
+                    self.logger.info("Page URL: " + self.driver.current_url)
+                    
+                    # Check if we're still on Cloudflare
+                    if self._is_cloudflare_page():
+                        self.logger.warning("Still on Cloudflare page - protection not fully bypassed")
+                        break
+                    else:
+                        self.logger.warning("Page loaded but no job cards found - HTML structure may have changed")
+                        break
                 
                 self.logger.info(f"Found {len(job_cards)} jobs on page {page} for query: {query}")
                 
